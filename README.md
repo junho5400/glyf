@@ -1,36 +1,58 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Glyf
 
-## Getting Started
+A text-to-SVG glyph generator. You give it a vibe and a letter; it streams a glyph token-by-token from a fine-tuned model, draws it like a pen on paper, and lets you edit the resulting path by hand. Save up a library and download it as a TTF.
 
-First, run the development server:
+Built as a demo of model-aware UX: making a generative model's output feel like a draft you can refine, not a black-box result you keep regenerating until it's right.
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+## Stack
+
+Next.js 16 (App Router) · TypeScript · Tailwind v4 · Modal (serverless GPU) · Qwen2.5-Coder-7B + private LoRA · opentype.js
+
+## Architecture
+
+```
+browser ── /api/generate ── Modal router ── GPU container ── Qwen2.5-Coder-7B + LoRA
+   │                          (tiny image)      (L4 GPU,        (HF Hub, private)
+   │                                             warm pool)
+   ▼
+SSE → progressive sanitizer → pen-stroke render → editable path
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+The frontend always works against an SSE contract — `data: {"text": "<chunk>"}` for tokens, `data: {"done": true}` to finish. With `MODAL_URL` unset, the API route serves a mock stream; with it set, the route proxies to the deployed Modal endpoint. Same UI, swappable backend.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+The path editor is a from-scratch Bezier surface — drag anchors, move/scale/rotate selections, simplify, fit to typographic ratios (cap-height for caps and ascenders, x-height for x-height letters).
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## Run locally (mock backend, no GPU needed)
 
-## Learn More
+```bash
+npm install
+npm run dev
+```
 
-To learn more about Next.js, take a look at the following resources:
+The mock returns a hard-coded SVG via streaming SSE so you can develop the UI without spending GPU minutes.
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Run with the real model
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+You need a Modal account and a Hugging Face token with read access to the (private) LoRA adapter. Then:
 
-## Deploy on Vercel
+```bash
+pip install modal
+modal serve backend/modal_app.py    # dev mode — re-deploys on save
+# or
+modal deploy backend/modal_app.py   # persistent endpoint
+```
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+Copy the URL Modal prints, then:
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+```bash
+echo "MODAL_URL=https://<your-modal-url>" > .env.local
+npm run dev
+```
+
+First call is a 5–10 min cold start (the container downloads ~14 GB of weights into the `glyf-model-cache` volume). Subsequent cold starts are ~30–60s. Warm calls are instant.
+
+## Project notes
+
+- The base model is `Qwen/Qwen2.5-Coder-7B`. The LoRA was fine-tuned on glyph-captioned SVGs; that adapter is private. Cloning the repo gets you the frontend and the Modal scaffolding, not the model.
+- Streaming SVG sanitization (`src/lib/sanitize.ts`) handles mid-token cuts — partial tags, broken attributes, half-written numbers — so the canvas can re-render every chunk without flickering or trailing brackets.
+- Multi-glyph TTF generation goes through `opentype.js`; the per-letter cumulative ascender/descender is computed from the rendered path bbox relative to a fixed baseline.
