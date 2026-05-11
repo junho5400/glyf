@@ -1,6 +1,7 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { PathEditor } from '@/components/PathEditor';
 import { centerSvg } from '@/lib/center';
 import { downloadFont, downloadSvg } from '@/lib/download';
 import { libraryToTtf } from '@/lib/font';
@@ -10,6 +11,15 @@ import {
   saveLibrary,
   type Library,
 } from '@/lib/library';
+import {
+  extractD,
+  fitLetter,
+  parsePath,
+  replaceD,
+  serializePath,
+  simplifyPath,
+  softenAnchors,
+} from '@/lib/pathOps';
 import { sanitizeSvg } from '@/lib/sanitize';
 
 async function* readSse(
@@ -79,6 +89,14 @@ export default function Home() {
   const [library, setLibrary] = useState<Library>({});
   const [libraryReady, setLibraryReady] = useState(false);
   const [typeText, setTypeText] = useState('');
+  const [editHistory, setEditHistory] = useState<Record<string, string[]>>({});
+  const [redoHistory, setRedoHistory] = useState<Record<string, string[]>>({});
+  const [anchorsVisible, setAnchorsVisible] = useState(true);
+  const [selectedAnchors, setSelectedAnchors] = useState<ReadonlySet<number>>(
+    new Set(),
+  );
+  const [zoom, setZoom] = useState(1);
+  const [pan, setPan] = useState({ x: 0, y: 0 });
 
   // Load library from localStorage on mount
   useEffect(() => {
@@ -167,6 +185,8 @@ export default function Home() {
         createdAt: Date.now(),
       },
     }));
+    setEditHistory((h) => ({ ...h, [char]: [] }));
+    setRedoHistory((h) => ({ ...h, [char]: [] }));
   }
 
   async function handleGenerate() {
@@ -208,6 +228,127 @@ export default function Home() {
     setStatus({ kind: 'complete', durationMs: 0, generated: 1 });
   }
 
+  function handlePathChange(newSvg: string, final: boolean) {
+    if (
+      final &&
+      letter &&
+      library[letter] &&
+      library[letter].svg !== newSvg
+    ) {
+      const prevSvg = library[letter].svg;
+      setEditHistory((h) => ({
+        ...h,
+        [letter]: [...(h[letter] ?? []), prevSvg].slice(-50),
+      }));
+      setRedoHistory((h) => ({ ...h, [letter]: [] }));
+    }
+    setSvg(newSvg);
+    if (final && letter && library[letter]) {
+      setLibrary((prev) => ({
+        ...prev,
+        [letter]: { ...prev[letter], svg: newSvg },
+      }));
+    }
+  }
+
+  function undo() {
+    if (!letter) return;
+    const stack = editHistory[letter];
+    if (!stack || stack.length === 0) return;
+    const prevSvg = stack[stack.length - 1];
+    const currentSvg = library[letter]?.svg ?? svg;
+    setSvg(prevSvg);
+    setLibrary((prev) =>
+      prev[letter]
+        ? { ...prev, [letter]: { ...prev[letter], svg: prevSvg } }
+        : prev,
+    );
+    setEditHistory((h) => ({
+      ...h,
+      [letter]: stack.slice(0, -1),
+    }));
+    setRedoHistory((h) => ({
+      ...h,
+      [letter]: [...(h[letter] ?? []), currentSvg].slice(-50),
+    }));
+  }
+
+  function handleFit() {
+    if (!svg || !letter) return;
+    const newSvg = fitLetter(svg, letter);
+    if (newSvg === svg) return;
+    handlePathChange(newSvg, true);
+  }
+
+  function handleClean() {
+    if (!svg || !letter || !library[letter]) return;
+    const d = extractD(svg);
+    if (!d) return;
+    const newD = simplifyPath(d);
+    if (newD === d) return;
+    handlePathChange(replaceD(svg, newD), true);
+  }
+
+  function handleSoftenSelection() {
+    if (!svg || !letter || selectedAnchors.size === 0) return;
+    const d = extractD(svg);
+    if (!d) return;
+    const ops = parsePath(d);
+    const newOps = softenAnchors(ops, selectedAnchors);
+    const newD = serializePath(newOps);
+    if (newD === d) return;
+    handlePathChange(replaceD(svg, newD), true);
+    setSelectedAnchors(new Set());
+  }
+
+  function redo() {
+    if (!letter) return;
+    const stack = redoHistory[letter];
+    if (!stack || stack.length === 0) return;
+    const nextSvg = stack[stack.length - 1];
+    const currentSvg = library[letter]?.svg ?? svg;
+    setSvg(nextSvg);
+    setLibrary((prev) =>
+      prev[letter]
+        ? { ...prev, [letter]: { ...prev[letter], svg: nextSvg } }
+        : prev,
+    );
+    setEditHistory((h) => ({
+      ...h,
+      [letter]: [...(h[letter] ?? []), currentSvg].slice(-50),
+    }));
+    setRedoHistory((h) => ({
+      ...h,
+      [letter]: stack.slice(0, -1),
+    }));
+  }
+
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      const tag = (e.target as HTMLElement | null)?.tagName?.toLowerCase();
+      if (tag === 'input' || tag === 'textarea') return;
+      const isUndo =
+        (e.ctrlKey || e.metaKey) &&
+        e.key.toLowerCase() === 'z' &&
+        !e.shiftKey;
+      const isRedo =
+        ((e.ctrlKey || e.metaKey) &&
+          e.key.toLowerCase() === 'z' &&
+          e.shiftKey) ||
+        ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y');
+      if (isUndo) {
+        e.preventDefault();
+        undo();
+      } else if (isRedo) {
+        e.preventDefault();
+        redo();
+      }
+    }
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [letter, editHistory, redoHistory, library]);
+
   const isStreaming = status.kind === 'generating';
   const idle = status.kind === 'idle' && !svg;
   const canDownload = status.kind === 'complete' || svg !== '';
@@ -225,7 +366,7 @@ export default function Home() {
         <div className="space-y-5">
           <div>
             <div className="flex items-baseline gap-4">
-              <span className="w-20 shrink-0 font-mono text-[10px] uppercase tracking-[0.18em] text-mute">
+              <span className="w-24 shrink-0 font-mono text-[10px] uppercase tracking-[0.18em] text-mute">
                 Vibe ──
               </span>
               <input
@@ -236,7 +377,7 @@ export default function Home() {
                 className="w-full border-0 border-b border-hairline bg-transparent pb-1 font-mono text-sm placeholder:text-mute focus:border-ink focus:outline-none disabled:opacity-50"
               />
             </div>
-            <div className="ml-20 mt-2 font-serif italic text-[13px] leading-[1.55] text-mute">
+            <div className="ml-28 mt-2 font-serif italic text-[13px] leading-[1.55] text-mute">
               {EXAMPLES.map((ex, i) => (
                 <span key={ex}>
                   {i > 0 && <span className="mx-1.5">·</span>}
@@ -254,7 +395,7 @@ export default function Home() {
           </div>
 
           <div className="flex items-baseline gap-4">
-            <span className="w-20 shrink-0 font-mono text-[10px] uppercase tracking-[0.18em] text-mute">
+            <span className="w-24 shrink-0 font-mono text-[10px] uppercase tracking-[0.18em] text-mute">
               Letter ──
             </span>
             <input
@@ -275,12 +416,12 @@ export default function Home() {
             </button>
           </div>
           {batchMode && (
-            <p className="ml-20 -mt-2 font-serif italic text-[12px] text-mute">
+            <p className="ml-28 -mt-2 font-serif italic text-[12px] text-mute">
               71 glyphs · A–Z, a–z, 0–9, .,!?:;-&apos;&quot;
             </p>
           )}
 
-          <div className="flex flex-wrap items-baseline gap-x-7 gap-y-2 pt-2">
+          <div className="pt-2">
             <button
               type="button"
               onClick={handleGenerate}
@@ -291,28 +432,158 @@ export default function Home() {
             >
               [ generate{batchMode ? ' all' : ''} ]
             </button>
-            {canDownload && svg && (
-              <button
-                type="button"
-                onClick={() => downloadSvg(svg, letter || 'glyph')}
-                className="font-mono text-[12px] uppercase tracking-[0.18em] transition-colors hover:text-mute"
-              >
-                [ download svg ]
-              </button>
-            )}
-            {libraryChars.length > 0 && (
-              <button
-                type="button"
-                onClick={() => downloadFont(library)}
-                className="font-mono text-[12px] uppercase tracking-[0.18em] transition-colors hover:text-mute"
-              >
-                [ download font ]
-              </button>
-            )}
           </div>
+
+          {(canDownload && svg) || libraryChars.length > 0 ? (
+            <div className="flex items-baseline gap-4">
+              <span className="w-24 shrink-0 font-mono text-[10px] uppercase tracking-[0.18em] text-mute">
+                Download ──
+              </span>
+              <div className="flex flex-wrap items-baseline gap-x-6 gap-y-1">
+                {canDownload && svg && (
+                  <button
+                    type="button"
+                    onClick={() => downloadSvg(svg, letter || 'glyph')}
+                    className="font-mono text-[12px] uppercase tracking-[0.18em] transition-colors hover:text-mute"
+                  >
+                    [ svg ]
+                  </button>
+                )}
+                {libraryChars.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => downloadFont(library)}
+                    className="font-mono text-[12px] uppercase tracking-[0.18em] transition-colors hover:text-mute"
+                  >
+                    [ font ]
+                  </button>
+                )}
+              </div>
+            </div>
+          ) : null}
+
+          {letter && library[letter] ? (
+            <div className="flex items-baseline gap-4">
+              <span className="w-24 shrink-0 font-mono text-[10px] uppercase tracking-[0.18em] text-mute">
+                View ──
+              </span>
+              <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const next = Math.max(1, +(zoom - 0.25).toFixed(2));
+                    setZoom(next);
+                    if (next <= 1) setPan({ x: 0, y: 0 });
+                  }}
+                  disabled={zoom <= 1}
+                  className="font-mono text-[12px] uppercase tracking-[0.18em] transition-colors hover:text-mute disabled:cursor-not-allowed disabled:text-mute"
+                >
+                  [ − ]
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setZoom(1);
+                    setPan({ x: 0, y: 0 });
+                  }}
+                  className="font-mono text-[10px] uppercase tracking-[0.18em] text-mute transition-colors hover:text-ink"
+                >
+                  {Math.round(zoom * 100)}%
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setZoom((z) => Math.min(5, +(z + 0.25).toFixed(2)))}
+                  disabled={zoom >= 5}
+                  className="font-mono text-[12px] uppercase tracking-[0.18em] transition-colors hover:text-mute disabled:cursor-not-allowed disabled:text-mute"
+                >
+                  [ + ]
+                </button>
+                <span className="font-serif italic text-[12px] text-mute">
+                  {zoom > 1
+                    ? 'hold space + drag to pan'
+                    : '⌘/ctrl + scroll to zoom'}
+                </span>
+              </div>
+            </div>
+          ) : null}
+
+          {letter && library[letter] ? (
+            <div className="flex items-baseline gap-4">
+              <span className="w-24 shrink-0 font-mono text-[10px] uppercase tracking-[0.18em] text-mute">
+                Edit ──
+              </span>
+              <div className="flex flex-wrap items-baseline gap-x-6 gap-y-1">
+                {(editHistory[letter]?.length ?? 0) > 0 && (
+                  <button
+                    type="button"
+                    onClick={undo}
+                    className="font-mono text-[12px] uppercase tracking-[0.18em] transition-colors hover:text-mute"
+                  >
+                    [ undo ]
+                  </button>
+                )}
+                {(redoHistory[letter]?.length ?? 0) > 0 && (
+                  <button
+                    type="button"
+                    onClick={redo}
+                    className="font-mono text-[12px] uppercase tracking-[0.18em] transition-colors hover:text-mute"
+                  >
+                    [ redo ]
+                  </button>
+                )}
+                {selectedAnchors.size > 0 && (
+                  <button
+                    type="button"
+                    onClick={handleSoftenSelection}
+                    className="font-mono text-[12px] uppercase tracking-[0.18em] transition-colors hover:text-mute"
+                  >
+                    [ soften ({selectedAnchors.size}) ]
+                  </button>
+                )}
+                {/[A-Z]/.test(letter) && (
+                  <button
+                    type="button"
+                    onClick={handleFit}
+                    className="font-mono text-[12px] uppercase tracking-[0.18em] transition-colors hover:text-mute"
+                  >
+                    [ fit ]
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={handleClean}
+                  className="font-mono text-[12px] uppercase tracking-[0.18em] transition-colors hover:text-mute"
+                >
+                  [ clean ]
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setAnchorsVisible((v) => !v)}
+                  className="font-mono text-[10px] uppercase tracking-[0.18em] text-mute transition-colors hover:text-ink"
+                >
+                  {anchorsVisible ? '■' : '☐'} anchors
+                </button>
+              </div>
+            </div>
+          ) : null}
         </div>
 
-        <Specimen svg={svg} isStreaming={isStreaming} idle={idle} />
+        <Specimen
+          svg={svg}
+          isStreaming={isStreaming}
+          idle={idle}
+          anchorsVisible={anchorsVisible}
+          selectedAnchors={selectedAnchors}
+          onSelectionChange={setSelectedAnchors}
+          onPathChange={handlePathChange}
+          zoom={zoom}
+          onZoomChange={(z) => {
+            setZoom(z);
+            if (z <= 1) setPan({ x: 0, y: 0 });
+          }}
+          pan={pan}
+          onPanChange={setPan}
+        />
       </section>
 
       <footer className="flex items-center justify-between pt-4 font-mono text-[10px] uppercase tracking-[0.18em] text-mute">
@@ -422,11 +693,42 @@ function Specimen({
   svg,
   isStreaming,
   idle,
+  anchorsVisible,
+  selectedAnchors,
+  onSelectionChange,
+  onPathChange,
+  zoom,
+  onZoomChange,
+  pan,
+  onPanChange,
 }: {
   svg: string;
   isStreaming: boolean;
   idle: boolean;
+  anchorsVisible: boolean;
+  selectedAnchors: ReadonlySet<number>;
+  onSelectionChange: (ids: ReadonlySet<number>) => void;
+  onPathChange: (svg: string, final: boolean) => void;
+  zoom: number;
+  onZoomChange: (zoom: number) => void;
+  pan: { x: number; y: number };
+  onPanChange: (pan: { x: number; y: number }) => void;
 }) {
+  const canvasRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const el = canvasRef.current;
+    if (!el) return;
+    function onWheel(e: WheelEvent) {
+      if (!e.ctrlKey && !e.metaKey) return;
+      e.preventDefault();
+      const delta = -e.deltaY * 0.005;
+      const next = Math.max(1, Math.min(5, +(zoom + delta).toFixed(2)));
+      onZoomChange(next);
+    }
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, [zoom, onZoomChange]);
   return (
     <div>
       <div className="relative mb-2 mr-16 h-3">
@@ -449,7 +751,17 @@ function Specimen({
         ))}
       </div>
       <div className="flex gap-3">
-        <div className="relative aspect-square flex-1 overflow-hidden border border-hairline">
+        <div
+          ref={canvasRef}
+          className="relative aspect-square flex-1 overflow-hidden border border-hairline"
+        >
+          <div
+            className="absolute inset-0"
+            style={{
+              transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
+              transformOrigin: 'center',
+            }}
+          >
           <svg
             className="pointer-events-none absolute inset-0 h-full w-full"
             viewBox="0 0 1000 1000"
@@ -488,6 +800,17 @@ function Specimen({
             }`}
             dangerouslySetInnerHTML={{ __html: svg }}
           />
+          <PathEditor
+            svg={svg}
+            onChange={onPathChange}
+            disabled={isStreaming || idle || !anchorsVisible}
+            selectedIds={selectedAnchors}
+            onSelectionChange={onSelectionChange}
+            zoom={zoom}
+            pan={pan}
+            onPanChange={onPanChange}
+          />
+          </div>
           {idle && (
             <div className="pointer-events-none absolute inset-0 flex items-center justify-center font-serif italic text-mute">
               awaiting input.
