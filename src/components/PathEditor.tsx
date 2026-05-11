@@ -152,7 +152,6 @@ export function PathEditor({
     onChange(replaceD(svg, newD), true);
   }
 
-  // ── Single-anchor drag ──────────────────────────────────────────────
   function handleAnchorDown(e: React.PointerEvent<SVGCircleElement>, idx: number) {
     e.preventDefault();
     e.stopPropagation();
@@ -194,7 +193,6 @@ export function PathEditor({
     deleteHandle(idx);
   }
 
-  // ── Background drag: pan when Space is held, rect-select otherwise ─
   function handleBgDown(e: React.PointerEvent<SVGSVGElement>) {
     if (e.target !== e.currentTarget) return;
     const pt = svgPoint(e.clientX, e.clientY);
@@ -259,7 +257,6 @@ export function PathEditor({
     setSelRect(null);
   }
 
-  // ── Selection translate ─────────────────────────────────────────────
   function handleMoveDown(e: React.PointerEvent<SVGRectElement>) {
     e.preventDefault();
     e.stopPropagation();
@@ -297,7 +294,6 @@ export function PathEditor({
     onChange(svg, true);
   }
 
-  // ── Selection resize (corner or edge) ───────────────────────────────
   function handleCornerDown(
     e: React.PointerEvent<SVGRectElement>,
     type: ResizeHandle,
@@ -402,7 +398,6 @@ export function PathEditor({
     );
   }
 
-  // ── Selection rotate ────────────────────────────────────────────────
   function handleRotateDown(e: React.PointerEvent<SVGCircleElement>) {
     if (!selBbox) return;
     e.preventDefault();

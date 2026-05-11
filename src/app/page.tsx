@@ -40,9 +40,7 @@ async function* readSse(
         if (!raw.startsWith('data: ')) continue;
         try {
           yield JSON.parse(raw.slice(6));
-        } catch {
-          // skip malformed event
-        }
+        } catch {}
       }
     }
   } finally {
@@ -98,19 +96,16 @@ export default function Home() {
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
 
-  // Load library from localStorage on mount
   useEffect(() => {
     setLibrary(loadLibrary());
     setLibraryReady(true);
   }, []);
 
-  // Save library to localStorage on change
   useEffect(() => {
     if (!libraryReady) return;
     saveLibrary(library);
   }, [library, libraryReady]);
 
-  // Register cumulative font for in-browser preview
   useEffect(() => {
     const chars = Object.keys(library);
     if (chars.length === 0) return;
@@ -148,7 +143,6 @@ export default function Home() {
     };
   }, [library]);
 
-  // Elapsed timer
   useEffect(() => {
     if (status.kind !== 'generating') return;
     const startedAt = status.startedAt;
