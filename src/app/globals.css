@@ -24,3 +24,24 @@ body {
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+
+.glyf-svg {
+  color: var(--foreground);
+}
+
+.glyf-svg path {
+  stroke-width: 0;
+  vector-effect: non-scaling-stroke;
+  transition: fill 250ms ease-in, stroke-width 250ms ease-out;
+}
+
+.glyf-svg path:not([fill]) {
+  fill: currentColor;
+}
+
+.glyf-svg.is-streaming path {
+  fill: none !important;
+  stroke: currentColor;
+  stroke-width: 1.5px;
+  transition: none;
+}
