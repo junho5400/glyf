@@ -540,7 +540,7 @@ export default function Home() {
                     [ soften ({selectedAnchors.size}) ]
                   </button>
                 )}
-                {/[A-Z]/.test(letter) && (
+                {/[A-Za-z]/.test(letter) && !/[gjpqy]/.test(letter) && (
                   <button
                     type="button"
                     onClick={handleFit}

@@ -437,10 +437,17 @@ function transformDCoords(
   return serializePath(newOps);
 }
 
+// Baseline at y=750. Cap-height region spans y=265–750. x-height region spans
+// y=410–750 (~70% of cap-height). Descenders (g, j, p, q, y) extend below the
+// baseline, so a simple bbox-to-range fit would crush their stems — skip them
+// and let the user fit manually.
 function getTargetYRange(letter: string): { yMin: number; yMax: number } | null {
   if (!letter) return null;
   const c = letter[0];
   if (/[A-Z]/.test(c)) return { yMin: 265, yMax: 750 };
+  if (/[gjpqy]/.test(c)) return null;
+  if (/[bdfhiklt]/.test(c)) return { yMin: 265, yMax: 750 };
+  if (/[a-z]/.test(c)) return { yMin: 410, yMax: 750 };
   return null;
 }
 
@@ -546,6 +553,41 @@ export function softenAnchors(
       }
       return { ...o, params: newParams };
     });
+  }
+  return result;
+}
+
+// Expand an anchor-based selection to include any control point whose two
+// bracketing anchors are both selected — otherwise a uniform transform leaves
+// controls behind and curves warp.
+export function expandSelectionToControls(
+  handles: Handle[],
+  selected: ReadonlySet<number>,
+): Set<number> {
+  const result = new Set(selected);
+  if (handles.length === 0) return result;
+
+  const prevAnchor: Array<number | null> = new Array(handles.length).fill(null);
+  let last: number | null = null;
+  for (let i = 0; i < handles.length; i++) {
+    prevAnchor[i] = last;
+    if (handles[i].kind === 'anchor') last = i;
+  }
+
+  const nextAnchor: Array<number | null> = new Array(handles.length).fill(null);
+  let coming: number | null = null;
+  for (let i = handles.length - 1; i >= 0; i--) {
+    if (handles[i].kind === 'anchor') coming = i;
+    nextAnchor[i] = coming;
+  }
+
+  for (let i = 0; i < handles.length; i++) {
+    if (handles[i].kind !== 'control') continue;
+    const a = prevAnchor[i];
+    const b = nextAnchor[i];
+    if (a !== null && b !== null && selected.has(a) && selected.has(b)) {
+      result.add(i);
+    }
   }
   return result;
 }

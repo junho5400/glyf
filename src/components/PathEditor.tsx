@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  expandSelectionToControls,
   extractD,
   extractTransformX,
   getHandles,
@@ -245,15 +246,15 @@ export function PathEditor({
       const xMax = Math.max(selRect.x1, selRect.x2);
       const yMin = Math.min(selRect.y1, selRect.y2);
       const yMax = Math.max(selRect.y1, selRect.y2);
-      const next = new Set<number>();
+      const picked = new Set<number>();
       handles.forEach((h, i) => {
         const vx = h.x + xShift;
         const vy = h.y;
         if (vx >= xMin && vx <= xMax && vy >= yMin && vy <= yMax) {
-          next.add(i);
+          picked.add(i);
         }
       });
-      onSelectionChange?.(next);
+      onSelectionChange?.(expandSelectionToControls(handles, picked));
     }
     setSelRect(null);
   }
