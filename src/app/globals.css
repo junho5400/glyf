@@ -1,38 +1,37 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --paper: #ffffff;
+  --ink: #0a0a0a;
+  --hairline: #d4d4d4;
+  --mute: #737373;
 }
 
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
+  --color-paper: var(--paper);
+  --color-ink: var(--ink);
+  --color-hairline: var(--hairline);
+  --color-mute: var(--mute);
+  --font-serif: var(--font-instrument-serif);
   --font-mono: var(--font-geist-mono);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
-}
-
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font-geist-mono), monospace;
+  font-feature-settings: "tnum" 1;
 }
 
 .glyf-svg {
-  color: var(--foreground);
+  color: var(--ink);
 }
 
 .glyf-svg path {
+  stroke: var(--ink);
   stroke-width: 0;
   vector-effect: non-scaling-stroke;
-  transition: fill 250ms ease-in, stroke-width 250ms ease-out;
+  transition: stroke-width 250ms ease-out, stroke 250ms ease-out;
 }
 
 .glyf-svg path:not([fill]) {
@@ -41,7 +40,7 @@ body {
 
 .glyf-svg.is-streaming path {
   fill: none !important;
-  stroke: currentColor;
+  stroke: #c2271e;
   stroke-width: 1.5px;
   transition: none;
 }
