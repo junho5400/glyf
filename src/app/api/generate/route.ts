@@ -14,6 +14,12 @@ function* chunks(text: string): Generator<string> {
   }
 }
 
+const SSE_HEADERS = {
+  'Content-Type': 'text/event-stream',
+  'Cache-Control': 'no-cache, no-transform',
+  Connection: 'keep-alive',
+} as const;
+
 export async function POST(request: Request) {
   let body: { vibe?: string; letter?: string };
   try {
@@ -26,9 +32,25 @@ export async function POST(request: Request) {
     return new Response('Missing vibe or letter', { status: 400 });
   }
 
+  const modalUrl = process.env.MODAL_URL;
+  if (modalUrl) {
+    const upstream = await fetch(modalUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ vibe, letter }),
+      signal: request.signal,
+    });
+    if (!upstream.ok || !upstream.body) {
+      const detail = await upstream.text().catch(() => '');
+      return new Response(`Modal upstream ${upstream.status}: ${detail}`, {
+        status: 502,
+      });
+    }
+    return new Response(upstream.body, { headers: SSE_HEADERS });
+  }
+
   const { signal } = request;
   const encoder = new TextEncoder();
-
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
       for (const chunk of chunks(MOCK_SVG)) {
@@ -46,12 +68,5 @@ export async function POST(request: Request) {
       controller.close();
     },
   });
-
-  return new Response(stream, {
-    headers: {
-      'Content-Type': 'text/event-stream',
-      'Cache-Control': 'no-cache, no-transform',
-      Connection: 'keep-alive',
-    },
-  });
+  return new Response(stream, { headers: SSE_HEADERS });
 }
