@@ -7,9 +7,9 @@ const PARAM_COUNT: Record<string, number> = {
 
 const TOKEN_RE = /[MmLlHhVvCcSsQqTtAaZz]|-?\d*\.?\d+(?:e-?\d+)?/g;
 
-type Bbox = { minX: number; maxX: number; minY: number; maxY: number };
+export type Bbox = { minX: number; maxX: number; minY: number; maxY: number };
 
-function pathBbox(d: string): Bbox | null {
+export function pathBbox(d: string): Bbox | null {
   const tokens = d.match(TOKEN_RE);
   if (!tokens?.length) return null;
 

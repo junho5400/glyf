@@ -2,6 +2,14 @@
 
 import { useEffect, useState } from 'react';
 import { centerSvg } from '@/lib/center';
+import { downloadFont, downloadSvg } from '@/lib/download';
+import { libraryToTtf } from '@/lib/font';
+import {
+  BATCH_SET,
+  loadLibrary,
+  saveLibrary,
+  type Library,
+} from '@/lib/library';
 import { sanitizeSvg } from '@/lib/sanitize';
 
 async function* readSse(
@@ -51,17 +59,78 @@ const V_TICKS = [0, 250, 500, 750, 1000];
 
 type Status =
   | { kind: 'idle' }
-  | { kind: 'generating'; startedAt: number }
-  | { kind: 'complete'; durationMs: number; chars: number; commands: number }
+  | {
+      kind: 'generating';
+      startedAt: number;
+      current: string;
+      done: number;
+      total: number;
+    }
+  | { kind: 'complete'; durationMs: number; generated: number }
   | { kind: 'error'; message: string };
 
 export default function Home() {
   const [vibe, setVibe] = useState('');
   const [letter, setLetter] = useState('');
+  const [batchMode, setBatchMode] = useState(false);
   const [svg, setSvg] = useState('');
   const [status, setStatus] = useState<Status>({ kind: 'idle' });
   const [elapsed, setElapsed] = useState(0);
+  const [library, setLibrary] = useState<Library>({});
+  const [libraryReady, setLibraryReady] = useState(false);
+  const [typeText, setTypeText] = useState('');
 
+  // Load library from localStorage on mount
+  useEffect(() => {
+    setLibrary(loadLibrary());
+    setLibraryReady(true);
+  }, []);
+
+  // Save library to localStorage on change
+  useEffect(() => {
+    if (!libraryReady) return;
+    saveLibrary(library);
+  }, [library, libraryReady]);
+
+  // Register cumulative font for in-browser preview
+  useEffect(() => {
+    const chars = Object.keys(library);
+    if (chars.length === 0) return;
+    let cancelled = false;
+    const update = async () => {
+      try {
+        const buf = libraryToTtf(library);
+        const ranges = chars
+          .map((c) => {
+            const cp = c.codePointAt(0);
+            return cp === undefined
+              ? null
+              : `U+${cp.toString(16).toUpperCase().padStart(4, '0')}`;
+          })
+          .filter((s): s is string => s !== null)
+          .join(',');
+        const fontFace = new FontFace('GlyfPreview', buf, {
+          unicodeRange: ranges,
+        });
+        await fontFace.load();
+        if (cancelled) return;
+        const toRemove: FontFace[] = [];
+        document.fonts.forEach((ff) => {
+          if (ff.family === 'GlyfPreview') toRemove.push(ff);
+        });
+        toRemove.forEach((ff) => document.fonts.delete(ff));
+        document.fonts.add(fontFace);
+      } catch (err) {
+        console.error('Font preview load failed', err);
+      }
+    };
+    update();
+    return () => {
+      cancelled = true;
+    };
+  }, [library]);
+
+  // Elapsed timer
   useEffect(() => {
     if (status.kind !== 'generating') return;
     const startedAt = status.startedAt;
@@ -71,32 +140,58 @@ export default function Home() {
     return () => clearInterval(interval);
   }, [status]);
 
-  async function handleGenerate() {
-    if (!vibe || !letter) return;
-    const startedAt = Date.now();
-    setStatus({ kind: 'generating', startedAt });
+  async function generateOne(vibeText: string, char: string) {
     setSvg('');
+    let finalSvg = '';
+    const res = await fetch('/api/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ vibe: vibeText, letter: char }),
+    });
+    if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
+    let buf = '';
+    for await (const event of readSse(res.body)) {
+      const e = event as { text?: string; done?: boolean };
+      if (e.done) break;
+      if (typeof e.text !== 'string') continue;
+      buf += e.text;
+      finalSvg = centerSvg(sanitizeSvg(buf));
+      setSvg(finalSvg);
+    }
+    setLibrary((prev) => ({
+      ...prev,
+      [char]: {
+        letter: char,
+        svg: finalSvg,
+        vibe: vibeText,
+        createdAt: Date.now(),
+      },
+    }));
+  }
+
+  async function handleGenerate() {
+    if (!vibe) return;
+    const chars = batchMode ? BATCH_SET : letter ? [letter] : [];
+    if (chars.length === 0) return;
+    const startedAt = Date.now();
     setElapsed(0);
     try {
-      const res = await fetch('/api/generate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ vibe, letter }),
-      });
-      if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
-      let buf = '';
-      for await (const event of readSse(res.body)) {
-        const e = event as { text?: string; done?: boolean };
-        if (e.done) break;
-        if (typeof e.text !== 'string') continue;
-        buf += e.text;
-        setSvg(centerSvg(sanitizeSvg(buf)));
+      for (let i = 0; i < chars.length; i++) {
+        const ch = chars[i];
+        setStatus({
+          kind: 'generating',
+          startedAt,
+          current: ch,
+          done: i,
+          total: chars.length,
+        });
+        await generateOne(vibe, ch);
       }
-      const durationMs = Date.now() - startedAt;
-      const dMatch = buf.match(/d="([^"]*)"/);
-      const d = dMatch ? dMatch[1] : '';
-      const commands = (d.match(/[MLQCSTHVAZmlqctshvaz]/g) || []).length;
-      setStatus({ kind: 'complete', durationMs, chars: buf.length, commands });
+      setStatus({
+        kind: 'complete',
+        durationMs: Date.now() - startedAt,
+        generated: chars.length,
+      });
     } catch (err) {
       setStatus({
         kind: 'error',
@@ -105,8 +200,18 @@ export default function Home() {
     }
   }
 
+  function selectFromLibrary(char: string) {
+    const item = library[char];
+    if (!item) return;
+    setSvg(item.svg);
+    setLetter(char);
+    setStatus({ kind: 'complete', durationMs: 0, generated: 1 });
+  }
+
   const isStreaming = status.kind === 'generating';
   const idle = status.kind === 'idle' && !svg;
+  const canDownload = status.kind === 'complete' || svg !== '';
+  const libraryChars = Object.keys(library);
 
   return (
     <main className="mx-auto max-w-5xl px-8 py-8">
@@ -120,14 +225,15 @@ export default function Home() {
         <div className="space-y-5">
           <div>
             <div className="flex items-baseline gap-4">
-              <span className="w-16 shrink-0 font-mono text-[10px] uppercase tracking-[0.18em] text-mute">
+              <span className="w-20 shrink-0 font-mono text-[10px] uppercase tracking-[0.18em] text-mute">
                 Vibe ──
               </span>
               <input
                 type="text"
                 value={vibe}
                 onChange={(e) => setVibe(e.target.value)}
-                className="w-full border-0 border-b border-hairline bg-transparent pb-1 font-mono text-sm focus:border-ink focus:outline-none"
+                disabled={isStreaming}
+                className="w-full border-0 border-b border-hairline bg-transparent pb-1 font-mono text-sm placeholder:text-mute focus:border-ink focus:outline-none disabled:opacity-50"
               />
             </div>
             <div className="ml-20 mt-2 font-serif italic text-[13px] leading-[1.55] text-mute">
@@ -137,7 +243,8 @@ export default function Home() {
                   <button
                     type="button"
                     onClick={() => setVibe(ex)}
-                    className="transition-colors hover:text-ink"
+                    disabled={isStreaming}
+                    className="transition-colors hover:text-ink disabled:hover:text-mute"
                   >
                     “{ex}”
                   </button>
@@ -147,29 +254,61 @@ export default function Home() {
           </div>
 
           <div className="flex items-baseline gap-4">
-            <span className="w-16 shrink-0 font-mono text-[10px] uppercase tracking-[0.18em] text-mute">
+            <span className="w-20 shrink-0 font-mono text-[10px] uppercase tracking-[0.18em] text-mute">
               Letter ──
             </span>
             <input
               type="text"
               value={letter}
-              onChange={(e) =>
-                setLetter(e.target.value.slice(0, 1).toUpperCase())
-              }
+              onChange={(e) => setLetter(e.target.value.slice(0, 1))}
               maxLength={1}
-              className="w-14 border-0 border-b border-hairline bg-transparent pb-1 text-center font-mono text-2xl focus:border-ink focus:outline-none"
+              disabled={batchMode || isStreaming}
+              className="w-14 border-0 border-b border-hairline bg-transparent pb-1 text-center font-mono text-2xl focus:border-ink focus:outline-none disabled:opacity-30"
             />
+            <button
+              type="button"
+              onClick={() => setBatchMode((b) => !b)}
+              disabled={isStreaming}
+              className="ml-4 font-mono text-[10px] uppercase tracking-[0.18em] text-mute transition-colors hover:text-ink disabled:hover:text-mute"
+            >
+              {batchMode ? '■' : '☐'} batch
+            </button>
           </div>
+          {batchMode && (
+            <p className="ml-20 -mt-2 font-serif italic text-[12px] text-mute">
+              71 glyphs · A–Z, a–z, 0–9, .,!?:;-&apos;&quot;
+            </p>
+          )}
 
-          <div className="pt-2">
+          <div className="flex flex-wrap items-baseline gap-x-7 gap-y-2 pt-2">
             <button
               type="button"
               onClick={handleGenerate}
-              disabled={!vibe || !letter || isStreaming}
+              disabled={
+                !vibe || (!batchMode && !letter) || isStreaming
+              }
               className="font-mono text-[12px] uppercase tracking-[0.18em] transition-colors hover:text-mute disabled:cursor-not-allowed disabled:text-mute"
             >
-              [ generate ]
+              [ generate{batchMode ? ' all' : ''} ]
             </button>
+            {canDownload && svg && (
+              <button
+                type="button"
+                onClick={() => downloadSvg(svg, letter || 'glyph')}
+                className="font-mono text-[12px] uppercase tracking-[0.18em] transition-colors hover:text-mute"
+              >
+                [ download svg ]
+              </button>
+            )}
+            {libraryChars.length > 0 && (
+              <button
+                type="button"
+                onClick={() => downloadFont(library)}
+                className="font-mono text-[12px] uppercase tracking-[0.18em] transition-colors hover:text-mute"
+              >
+                [ download font ]
+              </button>
+            )}
           </div>
         </div>
 
@@ -180,6 +319,72 @@ export default function Home() {
         <span>Status ── {statusLabel(status)}</span>
         <span>{statusMeta(status, elapsed)}</span>
       </footer>
+
+      {libraryChars.length > 0 && (
+        <section className="mt-10 border-t border-hairline pt-7">
+          <div className="mb-4 flex items-baseline justify-between font-mono text-[10px] uppercase tracking-[0.18em]">
+            <span className="text-mute">
+              Library ── {libraryChars.length} glyph
+              {libraryChars.length === 1 ? '' : 's'}
+            </span>
+            <button
+              type="button"
+              onClick={() => {
+                if (confirm('Clear the whole library?')) setLibrary({});
+              }}
+              className="text-mute transition-colors hover:text-ink"
+            >
+              clear
+            </button>
+          </div>
+          <div className="flex flex-wrap gap-1.5">
+            {libraryChars.map((ch) => (
+              <button
+                key={ch}
+                type="button"
+                onClick={() => selectFromLibrary(ch)}
+                className="group flex h-16 w-16 flex-col items-center justify-center rounded border border-hairline transition-colors hover:border-ink"
+                title={`${ch} · "${library[ch].vibe}"`}
+              >
+                <div
+                  className="glyf-tile h-11 w-11 [&_svg]:h-full [&_svg]:w-full"
+                  dangerouslySetInnerHTML={{ __html: library[ch].svg }}
+                />
+                <span className="mt-0.5 font-mono text-[9px] uppercase tracking-[0.1em] text-mute group-hover:text-ink">
+                  {ch === ' ' ? '␣' : ch}
+                </span>
+              </button>
+            ))}
+          </div>
+        </section>
+      )}
+
+      {libraryChars.length > 0 && (
+        <section className="mt-8 border-t border-hairline pt-7">
+          <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-mute">
+            Preview ──
+          </span>
+          <div
+            className="mt-3 min-h-[5rem] break-words text-6xl leading-tight"
+            style={{
+              fontFamily: 'GlyfPreview, system-ui, sans-serif',
+            }}
+          >
+            {typeText || (
+              <span className="font-serif italic text-[15px] text-mute">
+                type below to preview
+              </span>
+            )}
+          </div>
+          <textarea
+            value={typeText}
+            onChange={(e) => setTypeText(e.target.value)}
+            rows={2}
+            placeholder="The quick brown fox..."
+            className="mt-4 w-full border-0 border-b border-hairline bg-transparent pb-2 font-mono text-sm placeholder:text-mute focus:border-ink focus:outline-none"
+          />
+        </section>
+      )}
     </main>
   );
 }
@@ -202,9 +407,12 @@ function statusMeta(status: Status, elapsed: number) {
     case 'idle':
       return '—';
     case 'generating':
-      return `T+ ${elapsed.toFixed(2)} s`;
+      if (status.total > 1) {
+        return `${status.current} · ${status.done}/${status.total} · T+ ${elapsed.toFixed(2)} s`;
+      }
+      return `${status.current} · T+ ${elapsed.toFixed(2)} s`;
     case 'complete':
-      return `${(status.durationMs / 1000).toFixed(2)} s · ${status.chars} ch · ${status.commands} cmd`;
+      return `${(status.durationMs / 1000).toFixed(2)} s · ${status.generated} letter${status.generated === 1 ? '' : 's'}`;
     case 'error':
       return status.message;
   }
