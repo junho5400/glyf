@@ -2,57 +2,14 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { PathEditor } from '@/components/PathEditor';
-import { centerSvg } from '@/lib/center';
 import { downloadFont, downloadSvg } from '@/lib/download';
-import { libraryToTtf } from '@/lib/font';
-import {
-  BATCH_SET,
-  loadLibrary,
-  saveLibrary,
-  type Library,
-} from '@/lib/library';
-import {
-  extractD,
-  fitLetter,
-  parsePath,
-  replaceD,
-  serializePath,
-  simplifyPath,
-  softenAnchors,
-} from '@/lib/pathOps';
-import { sanitizeSvg } from '@/lib/sanitize';
-
-async function* readSse(
-  body: ReadableStream<Uint8Array>,
-): AsyncGenerator<unknown> {
-  const reader = body.getReader();
-  const decoder = new TextDecoder();
-  let buf = '';
-  try {
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buf += decoder.decode(value, { stream: true });
-      let idx: number;
-      while ((idx = buf.indexOf('\n\n')) !== -1) {
-        const raw = buf.slice(0, idx);
-        buf = buf.slice(idx + 2);
-        if (!raw.startsWith('data: ')) continue;
-        try {
-          yield JSON.parse(raw.slice(6));
-        } catch {}
-      }
-    }
-  } finally {
-    reader.releaseLock();
-  }
-}
+import { THEME_ORDER, THEMES, type ThemeName } from '@/lib/themes';
+import { useGlyfStudio, type Status } from '@/lib/useGlyfStudio';
 
 const EXAMPLES = [
   'art deco gold leaf',
   'geometric sans',
   'ornate serif',
-  'brutalist condensed',
 ];
 
 const GUIDES = [
@@ -65,321 +22,84 @@ const GUIDES = [
 
 const V_TICKS = [0, 250, 500, 750, 1000];
 
-type Status =
-  | { kind: 'idle' }
-  | {
-      kind: 'generating';
-      startedAt: number;
-      current: string;
-      done: number;
-      total: number;
-    }
-  | { kind: 'complete'; durationMs: number; generated: number }
-  | { kind: 'error'; message: string };
-
 export default function Home() {
-  const [vibe, setVibe] = useState('');
-  const [letter, setLetter] = useState('');
-  const [batchMode, setBatchMode] = useState(false);
-  const [svg, setSvg] = useState('');
-  const [status, setStatus] = useState<Status>({ kind: 'idle' });
-  const [elapsed, setElapsed] = useState(0);
-  const [library, setLibrary] = useState<Library>({});
-  const [libraryReady, setLibraryReady] = useState(false);
-  const [typeText, setTypeText] = useState('');
-  const [editHistory, setEditHistory] = useState<Record<string, string[]>>({});
-  const [redoHistory, setRedoHistory] = useState<Record<string, string[]>>({});
-  const [anchorsVisible, setAnchorsVisible] = useState(true);
-  const [selectedAnchors, setSelectedAnchors] = useState<ReadonlySet<number>>(
-    new Set(),
-  );
-  const [zoom, setZoom] = useState(1);
-  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const s = useGlyfStudio({ anchorsVisibleDefault: false });
+  const [theme, setTheme] = useState<ThemeName>('plain');
+
+  function applyTheme(name: ThemeName) {
+    const root = document.documentElement;
+    for (const [k, v] of Object.entries(THEMES[name])) {
+      root.style.setProperty(k, v);
+    }
+    setTheme(name);
+    try {
+      localStorage.setItem('glyf-theme', name);
+    } catch {}
+  }
 
   useEffect(() => {
-    setLibrary(loadLibrary());
-    setLibraryReady(true);
+    try {
+      const saved = localStorage.getItem('glyf-theme') as ThemeName | null;
+      if (saved && THEMES[saved]) applyTheme(saved);
+    } catch {}
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  useEffect(() => {
-    if (!libraryReady) return;
-    saveLibrary(library);
-  }, [library, libraryReady]);
-
-  useEffect(() => {
-    const chars = Object.keys(library);
-    if (chars.length === 0) return;
-    let cancelled = false;
-    const update = async () => {
-      try {
-        const buf = libraryToTtf(library);
-        const ranges = chars
-          .map((c) => {
-            const cp = c.codePointAt(0);
-            return cp === undefined
-              ? null
-              : `U+${cp.toString(16).toUpperCase().padStart(4, '0')}`;
-          })
-          .filter((s): s is string => s !== null)
-          .join(',');
-        const fontFace = new FontFace('GlyfPreview', buf, {
-          unicodeRange: ranges,
-        });
-        await fontFace.load();
-        if (cancelled) return;
-        const toRemove: FontFace[] = [];
-        document.fonts.forEach((ff) => {
-          if (ff.family === 'GlyfPreview') toRemove.push(ff);
-        });
-        toRemove.forEach((ff) => document.fonts.delete(ff));
-        document.fonts.add(fontFace);
-      } catch (err) {
-        console.error('Font preview load failed', err);
-      }
-    };
-    update();
-    return () => {
-      cancelled = true;
-    };
-  }, [library]);
-
-  useEffect(() => {
-    if (status.kind !== 'generating') return;
-    const startedAt = status.startedAt;
-    const interval = setInterval(() => {
-      setElapsed((Date.now() - startedAt) / 1000);
-    }, 50);
-    return () => clearInterval(interval);
-  }, [status]);
-
-  async function generateOne(vibeText: string, char: string) {
-    setSvg('');
-    let finalSvg = '';
-    const res = await fetch('/api/generate', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ vibe: vibeText, letter: char }),
-    });
-    if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
-    let buf = '';
-    for await (const event of readSse(res.body)) {
-      const e = event as { text?: string; done?: boolean };
-      if (e.done) break;
-      if (typeof e.text !== 'string') continue;
-      buf += e.text;
-      finalSvg = centerSvg(sanitizeSvg(buf));
-      setSvg(finalSvg);
-    }
-    setLibrary((prev) => ({
-      ...prev,
-      [char]: {
-        letter: char,
-        svg: finalSvg,
-        vibe: vibeText,
-        createdAt: Date.now(),
-      },
-    }));
-    setEditHistory((h) => ({ ...h, [char]: [] }));
-    setRedoHistory((h) => ({ ...h, [char]: [] }));
-  }
-
-  async function handleGenerate() {
-    if (!vibe) return;
-    const chars = batchMode ? BATCH_SET : letter ? [letter] : [];
-    if (chars.length === 0) return;
-    const startedAt = Date.now();
-    setElapsed(0);
-    try {
-      for (let i = 0; i < chars.length; i++) {
-        const ch = chars[i];
-        setStatus({
-          kind: 'generating',
-          startedAt,
-          current: ch,
-          done: i,
-          total: chars.length,
-        });
-        await generateOne(vibe, ch);
-      }
-      setStatus({
-        kind: 'complete',
-        durationMs: Date.now() - startedAt,
-        generated: chars.length,
-      });
-    } catch (err) {
-      setStatus({
-        kind: 'error',
-        message: err instanceof Error ? err.message : 'unknown',
-      });
-    }
-  }
-
-  function selectFromLibrary(char: string) {
-    const item = library[char];
-    if (!item) return;
-    setSvg(item.svg);
-    setLetter(char);
-    setStatus({ kind: 'complete', durationMs: 0, generated: 1 });
-  }
-
-  function handlePathChange(newSvg: string, final: boolean) {
-    if (
-      final &&
-      letter &&
-      library[letter] &&
-      library[letter].svg !== newSvg
-    ) {
-      const prevSvg = library[letter].svg;
-      setEditHistory((h) => ({
-        ...h,
-        [letter]: [...(h[letter] ?? []), prevSvg].slice(-50),
-      }));
-      setRedoHistory((h) => ({ ...h, [letter]: [] }));
-    }
-    setSvg(newSvg);
-    if (final && letter && library[letter]) {
-      setLibrary((prev) => ({
-        ...prev,
-        [letter]: { ...prev[letter], svg: newSvg },
-      }));
-    }
-  }
-
-  function undo() {
-    if (!letter) return;
-    const stack = editHistory[letter];
-    if (!stack || stack.length === 0) return;
-    const prevSvg = stack[stack.length - 1];
-    const currentSvg = library[letter]?.svg ?? svg;
-    setSvg(prevSvg);
-    setLibrary((prev) =>
-      prev[letter]
-        ? { ...prev, [letter]: { ...prev[letter], svg: prevSvg } }
-        : prev,
-    );
-    setEditHistory((h) => ({
-      ...h,
-      [letter]: stack.slice(0, -1),
-    }));
-    setRedoHistory((h) => ({
-      ...h,
-      [letter]: [...(h[letter] ?? []), currentSvg].slice(-50),
-    }));
-  }
-
-  function handleFit() {
-    if (!svg || !letter) return;
-    const newSvg = fitLetter(svg, letter);
-    if (newSvg === svg) return;
-    handlePathChange(newSvg, true);
-  }
-
-  function handleClean() {
-    if (!svg || !letter || !library[letter]) return;
-    const d = extractD(svg);
-    if (!d) return;
-    const newD = simplifyPath(d);
-    if (newD === d) return;
-    handlePathChange(replaceD(svg, newD), true);
-  }
-
-  function handleSoftenSelection() {
-    if (!svg || !letter || selectedAnchors.size === 0) return;
-    const d = extractD(svg);
-    if (!d) return;
-    const ops = parsePath(d);
-    const newOps = softenAnchors(ops, selectedAnchors);
-    const newD = serializePath(newOps);
-    if (newD === d) return;
-    handlePathChange(replaceD(svg, newD), true);
-    setSelectedAnchors(new Set());
-  }
-
-  function redo() {
-    if (!letter) return;
-    const stack = redoHistory[letter];
-    if (!stack || stack.length === 0) return;
-    const nextSvg = stack[stack.length - 1];
-    const currentSvg = library[letter]?.svg ?? svg;
-    setSvg(nextSvg);
-    setLibrary((prev) =>
-      prev[letter]
-        ? { ...prev, [letter]: { ...prev[letter], svg: nextSvg } }
-        : prev,
-    );
-    setEditHistory((h) => ({
-      ...h,
-      [letter]: [...(h[letter] ?? []), currentSvg].slice(-50),
-    }));
-    setRedoHistory((h) => ({
-      ...h,
-      [letter]: stack.slice(0, -1),
-    }));
-  }
-
-  useEffect(() => {
-    function onKey(e: KeyboardEvent) {
-      const tag = (e.target as HTMLElement | null)?.tagName?.toLowerCase();
-      if (tag === 'input' || tag === 'textarea') return;
-      const isUndo =
-        (e.ctrlKey || e.metaKey) &&
-        e.key.toLowerCase() === 'z' &&
-        !e.shiftKey;
-      const isRedo =
-        ((e.ctrlKey || e.metaKey) &&
-          e.key.toLowerCase() === 'z' &&
-          e.shiftKey) ||
-        ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'y');
-      if (isUndo) {
-        e.preventDefault();
-        undo();
-      } else if (isRedo) {
-        e.preventDefault();
-        redo();
-      }
-    }
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [letter, editHistory, redoHistory, library]);
-
-  const isStreaming = status.kind === 'generating';
-  const idle = status.kind === 'idle' && !svg;
-  const canDownload = status.kind === 'complete' || svg !== '';
-  const libraryChars = Object.keys(library);
+  const label =
+    'flex w-24 shrink-0 items-baseline whitespace-nowrap font-metric text-[11px] lowercase tracking-[0.22em] text-grey';
+  const zoomKey =
+    'neu-key rounded-[5px] bg-[color-mix(in_srgb,var(--paper)_40%,var(--sheet))] px-2.5 py-1 font-metric text-[10px] lowercase tracking-[0.18em] text-ink transition-colors hover:text-pen disabled:cursor-not-allowed disabled:bg-transparent disabled:text-faint';
+  const word =
+    'font-metric text-[12px] font-medium lowercase tracking-[0.18em] text-ink underline decoration-construction decoration-dotted underline-offset-4 transition-colors hover:text-pen hover:decoration-pen disabled:cursor-not-allowed disabled:text-faint disabled:no-underline';
 
   return (
-    <main className="mx-auto max-w-5xl px-8 py-8">
-      <header className="border-b border-hairline pb-3">
-        <h1 className="font-serif italic text-6xl leading-[0.85] tracking-[-0.02em]">
+    <main className="mx-auto max-w-5xl px-8 py-8 font-metric">
+      <header className="relative flex items-end justify-between border-b border-construction pb-3">
+        <h1 className="translate-y-[15px] font-wordmark text-6xl italic leading-[0.85] tracking-[-0.02em]">
           Glyf
         </h1>
+        <span
+          aria-hidden
+          className="absolute -bottom-px left-0 h-px w-[160px] bg-[linear-gradient(90deg,var(--pen)_0%,var(--pen)_72%,transparent_100%)]"
+        />
+        <div className="flex items-center gap-x-1.5 pb-1">
+          {THEME_ORDER.map((name) => (
+            <button
+              key={name}
+              type="button"
+              title={name}
+              onClick={() => applyTheme(name)}
+              className={`size-5 rounded-[3px] transition-shadow ${
+                theme === name ? 'neu-raised' : ''
+              }`}
+              style={{ background: THEMES[name]['--swatch'] }}
+            />
+          ))}
+        </div>
       </header>
 
-      <section className="grid grid-cols-[1fr_1.3fr] items-start gap-10 border-b border-hairline py-7">
-        <div className="space-y-5">
+      <section className="grid grid-cols-[1fr_1.3fr] items-start gap-10 border-b border-construction py-7">
+        <div className="space-y-8">
           <div>
-            <div className="flex items-baseline gap-4">
-              <span className="w-24 shrink-0 font-mono text-[10px] uppercase tracking-[0.18em] text-mute">
-                Vibe ──
-              </span>
+            <div className="flex items-baseline gap-3">
+              <span className={label}>vibe</span>
               <input
                 type="text"
-                value={vibe}
-                onChange={(e) => setVibe(e.target.value)}
-                disabled={isStreaming}
-                className="w-full border-0 border-b border-hairline bg-transparent pb-1 font-mono text-sm placeholder:text-mute focus:border-ink focus:outline-none disabled:opacity-50"
+                value={s.vibe}
+                onChange={(e) => s.setVibe(e.target.value)}
+                disabled={s.isStreaming}
+                className="w-full border-0 border-b border-construction bg-transparent pb-1 font-metric text-sm caret-pen placeholder:text-faint focus:border-ink focus:outline-none disabled:opacity-50"
               />
             </div>
-            <div className="ml-28 mt-2 font-serif italic text-[13px] leading-[1.55] text-mute">
+            <div className="ml-[108px] mt-2 whitespace-nowrap font-wordmark text-[11.5px] italic leading-[1.55] text-grey">
               {EXAMPLES.map((ex, i) => (
                 <span key={ex}>
                   {i > 0 && <span className="mx-1.5">·</span>}
                   <button
                     type="button"
-                    onClick={() => setVibe(ex)}
-                    disabled={isStreaming}
-                    className="transition-colors hover:text-ink disabled:hover:text-mute"
+                    onClick={() => s.setVibe(ex)}
+                    disabled={s.isStreaming}
+                    className="transition-colors hover:text-pen disabled:hover:text-grey"
                   >
                     “{ex}”
                   </button>
@@ -388,234 +108,207 @@ export default function Home() {
             </div>
           </div>
 
-          <div className="flex items-baseline gap-4">
-            <span className="w-24 shrink-0 font-mono text-[10px] uppercase tracking-[0.18em] text-mute">
-              Letter ──
-            </span>
+          <div className="flex items-baseline gap-3">
+            <span className={label}>letter</span>
             <input
               type="text"
-              value={letter}
-              onChange={(e) => setLetter(e.target.value.slice(0, 1))}
+              value={s.letter}
+              onChange={(e) => s.setLetter(e.target.value.slice(0, 1))}
               maxLength={1}
-              disabled={batchMode || isStreaming}
-              className="w-14 border-0 border-b border-hairline bg-transparent pb-1 text-center font-mono text-2xl focus:border-ink focus:outline-none disabled:opacity-30"
+              disabled={s.batchMode || s.isStreaming}
+              className="w-14 border-0 border-b border-construction bg-transparent pb-1 text-center font-metric text-2xl caret-pen focus:border-ink focus:outline-none disabled:opacity-30"
             />
             <button
               type="button"
-              onClick={() => setBatchMode((b) => !b)}
-              disabled={isStreaming}
-              className="ml-4 font-mono text-[10px] uppercase tracking-[0.18em] text-mute transition-colors hover:text-ink disabled:hover:text-mute"
+              onClick={() => s.setBatchMode(!s.batchMode)}
+              disabled={s.isStreaming}
+              className="ml-4 font-metric text-[10px] lowercase tracking-[0.18em] text-grey transition-colors hover:text-pen disabled:hover:text-grey"
             >
-              {batchMode ? '■' : '☐'} batch
+              <span className="mr-1 inline-block w-3 text-center">
+                {s.batchMode ? '■' : '☐'}
+              </span>
+              batch
             </button>
-          </div>
-          {batchMode && (
-            <p className="ml-28 -mt-2 font-serif italic text-[12px] text-mute">
-              71 glyphs · A–Z, a–z, 0–9, .,!?:;-&apos;&quot;
-            </p>
-          )}
-
-          <div className="pt-2">
             <button
               type="button"
-              onClick={handleGenerate}
-              disabled={
-                !vibe || (!batchMode && !letter) || isStreaming
-              }
-              className="font-mono text-[12px] uppercase tracking-[0.18em] transition-colors hover:text-mute disabled:cursor-not-allowed disabled:text-mute"
+              onClick={s.handleGenerate}
+              disabled={!s.vibe || (!s.batchMode && !s.letter) || s.isStreaming}
+              className="neu-key ml-4 rounded-md bg-[color-mix(in_srgb,var(--paper)_40%,var(--sheet))] px-5 py-2 font-metric text-[12px] lowercase tracking-[0.18em] text-ink transition-shadow disabled:cursor-not-allowed disabled:text-faint"
             >
-              [ generate{batchMode ? ' all' : ''} ]
+              draw
             </button>
           </div>
 
-          {(canDownload && svg) || libraryChars.length > 0 ? (
-            <div className="flex items-baseline gap-4">
-              <span className="w-24 shrink-0 font-mono text-[10px] uppercase tracking-[0.18em] text-mute">
-                Download ──
-              </span>
-              <div className="flex flex-wrap items-baseline gap-x-6 gap-y-1">
-                {canDownload && svg && (
-                  <button
-                    type="button"
-                    onClick={() => downloadSvg(svg, letter || 'glyph')}
-                    className="font-mono text-[12px] uppercase tracking-[0.18em] transition-colors hover:text-mute"
-                  >
-                    [ svg ]
-                  </button>
-                )}
-                {libraryChars.length > 0 && (
-                  <button
-                    type="button"
-                    onClick={() => downloadFont(library)}
-                    className="font-mono text-[12px] uppercase tracking-[0.18em] transition-colors hover:text-mute"
-                  >
-                    [ font ]
-                  </button>
-                )}
-              </div>
+          <div className="flex items-baseline gap-3">
+            <span className={label}>download</span>
+            <div className="flex flex-wrap items-baseline gap-x-6 gap-y-1">
+              <button
+                type="button"
+                onClick={() => downloadSvg(s.svg, s.letter || 'glyph')}
+                disabled={!s.canDownload || !s.svg}
+                className={word}
+              >
+                svg
+              </button>
+              <button
+                type="button"
+                onClick={() => downloadFont(s.library)}
+                disabled={s.libraryChars.length === 0}
+                className={word}
+              >
+                font
+              </button>
             </div>
-          ) : null}
+          </div>
 
-          {letter && library[letter] ? (
-            <div className="flex items-baseline gap-4">
-              <span className="w-24 shrink-0 font-mono text-[10px] uppercase tracking-[0.18em] text-mute">
-                View ──
-              </span>
-              <div className="flex flex-wrap items-baseline gap-x-3 gap-y-1">
+          <div>
+            <div className="flex items-baseline gap-3">
+              <span className={label}>view</span>
+              <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
                 <button
                   type="button"
                   onClick={() => {
-                    const next = Math.max(1, +(zoom - 0.25).toFixed(2));
-                    setZoom(next);
-                    if (next <= 1) setPan({ x: 0, y: 0 });
+                    const next = Math.max(1, +(s.zoom - 0.25).toFixed(2));
+                    s.setZoom(next);
+                    if (next <= 1) s.setPan({ x: 0, y: 0 });
                   }}
-                  disabled={zoom <= 1}
-                  className="font-mono text-[12px] uppercase tracking-[0.18em] transition-colors hover:text-mute disabled:cursor-not-allowed disabled:text-mute"
+                  disabled={!s.hasGlyph || s.zoom <= 1}
+                  className={zoomKey}
                 >
-                  [ − ]
+                  −
                 </button>
                 <button
                   type="button"
                   onClick={() => {
-                    setZoom(1);
-                    setPan({ x: 0, y: 0 });
+                    s.setZoom(1);
+                    s.setPan({ x: 0, y: 0 });
                   }}
-                  className="font-mono text-[10px] uppercase tracking-[0.18em] text-mute transition-colors hover:text-ink"
+                  className="px-1 font-metric text-[10px] tracking-[0.18em] text-grey transition-colors hover:text-pen"
                 >
-                  {Math.round(zoom * 100)}%
+                  {Math.round(s.zoom * 100)}%
                 </button>
                 <button
                   type="button"
-                  onClick={() => setZoom((z) => Math.min(5, +(z + 0.25).toFixed(2)))}
-                  disabled={zoom >= 5}
-                  className="font-mono text-[12px] uppercase tracking-[0.18em] transition-colors hover:text-mute disabled:cursor-not-allowed disabled:text-mute"
+                  onClick={() =>
+                    s.setZoom(Math.min(5, +(s.zoom + 0.25).toFixed(2)))
+                  }
+                  disabled={!s.hasGlyph || s.zoom >= 5}
+                  className={zoomKey}
                 >
-                  [ + ]
+                  +
                 </button>
-                <span className="font-serif italic text-[12px] text-mute">
-                  {zoom > 1
-                    ? 'hold space + drag to pan'
-                    : '⌘/ctrl + scroll to zoom'}
-                </span>
               </div>
             </div>
-          ) : null}
+            <p className="ml-[108px] mt-3 font-wordmark text-[12px] italic text-grey">
+              {s.zoom > 1
+                ? 'hold space + drag to pan'
+                : '⌘/ctrl + scroll to zoom'}
+            </p>
+          </div>
 
-          {letter && library[letter] ? (
-            <div className="flex items-baseline gap-4">
-              <span className="w-24 shrink-0 font-mono text-[10px] uppercase tracking-[0.18em] text-mute">
-                Edit ──
-              </span>
-              <div className="flex flex-wrap items-baseline gap-x-6 gap-y-1">
-                {(editHistory[letter]?.length ?? 0) > 0 && (
-                  <button
-                    type="button"
-                    onClick={undo}
-                    className="font-mono text-[12px] uppercase tracking-[0.18em] transition-colors hover:text-mute"
-                  >
-                    [ undo ]
-                  </button>
-                )}
-                {(redoHistory[letter]?.length ?? 0) > 0 && (
-                  <button
-                    type="button"
-                    onClick={redo}
-                    className="font-mono text-[12px] uppercase tracking-[0.18em] transition-colors hover:text-mute"
-                  >
-                    [ redo ]
-                  </button>
-                )}
-                {selectedAnchors.size > 0 && (
-                  <button
-                    type="button"
-                    onClick={handleSoftenSelection}
-                    className="font-mono text-[12px] uppercase tracking-[0.18em] transition-colors hover:text-mute"
-                  >
-                    [ soften ({selectedAnchors.size}) ]
-                  </button>
-                )}
-                {/[A-Za-z]/.test(letter) && !/[gjpqy]/.test(letter) && (
-                  <button
-                    type="button"
-                    onClick={handleFit}
-                    className="font-mono text-[12px] uppercase tracking-[0.18em] transition-colors hover:text-mute"
-                  >
-                    [ fit ]
-                  </button>
-                )}
+          <div className="flex items-baseline gap-3">
+            <span className={label}>edit</span>
+            <div className="flex flex-col gap-y-3">
+              <div className="flex items-baseline gap-x-5">
                 <button
                   type="button"
-                  onClick={handleClean}
-                  className="font-mono text-[12px] uppercase tracking-[0.18em] transition-colors hover:text-mute"
+                  onClick={s.undo}
+                  disabled={!s.hasGlyph || (s.editHistory[s.letter]?.length ?? 0) === 0}
+                  className={word}
                 >
-                  [ clean ]
+                  undo
                 </button>
                 <button
                   type="button"
-                  onClick={() => setAnchorsVisible((v) => !v)}
-                  className="font-mono text-[10px] uppercase tracking-[0.18em] text-mute transition-colors hover:text-ink"
+                  onClick={s.redo}
+                  disabled={!s.hasGlyph || (s.redoHistory[s.letter]?.length ?? 0) === 0}
+                  className={word}
                 >
-                  {anchorsVisible ? '■' : '☐'} anchors
+                  redo
+                </button>
+                <button
+                  type="button"
+                  onClick={s.handleSoftenSelection}
+                  disabled={!s.hasGlyph || s.selectedAnchors.size === 0}
+                  className={word}
+                >
+                  soften
+                </button>
+                <button
+                  type="button"
+                  onClick={s.handleFit}
+                  disabled={!s.canFit}
+                  className={word}
+                >
+                  fit
+                </button>
+                <button
+                  type="button"
+                  onClick={s.handleClean}
+                  disabled={!s.hasGlyph}
+                  className={word}
+                >
+                  clean
                 </button>
               </div>
-            </div>
-          ) : null}
+                <button
+                  type="button"
+                  onClick={() => s.setAnchorsVisible(!s.anchorsVisible)}
+                  style={{ alignSelf: 'flex-start' }}
+                  className="font-metric text-[10px] lowercase tracking-[0.18em] text-grey transition-colors hover:text-pen"
+                >
+                  <span className="mr-1 inline-block w-3 text-center">
+                    {s.anchorsVisible ? '■' : '☐'}
+                  </span>
+                  anchors
+                </button>
+              </div>
+          </div>
         </div>
 
-        <Specimen
-          svg={svg}
-          isStreaming={isStreaming}
-          idle={idle}
-          anchorsVisible={anchorsVisible}
-          selectedAnchors={selectedAnchors}
-          onSelectionChange={setSelectedAnchors}
-          onPathChange={handlePathChange}
-          zoom={zoom}
-          onZoomChange={(z) => {
-            setZoom(z);
-            if (z <= 1) setPan({ x: 0, y: 0 });
-          }}
-          pan={pan}
-          onPanChange={setPan}
-        />
+        <Specimen s={s} />
       </section>
 
-      <footer className="flex items-center justify-between pt-4 font-mono text-[10px] uppercase tracking-[0.18em] text-mute">
-        <span>Status ── {statusLabel(status)}</span>
-        <span>{statusMeta(status, elapsed)}</span>
+      <footer className="flex items-center justify-between pt-4 font-metric text-[11px] lowercase tracking-[0.22em] text-grey">
+<span>status · {statusLabel(s.status)}</span>
+        <span className={s.status.kind === 'error' ? 'text-pen' : undefined}>
+          {statusMeta(s.status, s.elapsed)}
+        </span>
       </footer>
 
-      {libraryChars.length > 0 && (
-        <section className="mt-10 border-t border-hairline pt-7">
-          <div className="mb-4 flex items-baseline justify-between font-mono text-[10px] uppercase tracking-[0.18em]">
-            <span className="text-mute">
-              Library ── {libraryChars.length} glyph
-              {libraryChars.length === 1 ? '' : 's'}
+      {s.libraryChars.length > 0 && (
+        <section className="mt-10 border-t border-construction pt-7">
+          <div className="mb-4 flex items-baseline justify-between font-metric text-[11px] lowercase tracking-[0.22em]">
+            <span className="text-grey">
+              library · {s.libraryChars.length} glyph
+              {s.libraryChars.length === 1 ? '' : 's'}
             </span>
             <button
               type="button"
               onClick={() => {
-                if (confirm('Clear the whole library?')) setLibrary({});
+                if (confirm('Clear the whole library?')) s.setLibrary({});
               }}
-              className="text-mute transition-colors hover:text-ink"
+              className="underline decoration-construction decoration-dotted underline-offset-4 text-grey transition-colors hover:text-pen hover:decoration-pen"
             >
               clear
             </button>
           </div>
           <div className="flex flex-wrap gap-1.5">
-            {libraryChars.map((ch) => (
+            {s.libraryChars.map((ch) => (
               <button
                 key={ch}
                 type="button"
-                onClick={() => selectFromLibrary(ch)}
-                className="group flex h-16 w-16 flex-col items-center justify-center rounded border border-hairline transition-colors hover:border-ink"
-                title={`${ch} · "${library[ch].vibe}"`}
+                onClick={() => s.selectFromLibrary(ch)}
+                className={`group flex h-16 w-16 flex-col items-center justify-center rounded-md bg-sheet transition-shadow ${
+                  ch === s.letter ? 'neu-raised' : ''
+                }`}
+                title={`${ch} · "${s.library[ch].vibe}"`}
               >
                 <div
                   className="glyf-tile h-11 w-11 [&_svg]:h-full [&_svg]:w-full"
-                  dangerouslySetInnerHTML={{ __html: library[ch].svg }}
+                  dangerouslySetInnerHTML={{ __html: s.library[ch].svg }}
                 />
-                <span className="mt-0.5 font-mono text-[9px] uppercase tracking-[0.1em] text-mute group-hover:text-ink">
+                <span className="mt-0.5 font-metric text-[9px] lowercase tracking-[0.1em] text-grey group-hover:text-pen">
                   {ch === ' ' ? '␣' : ch}
                 </span>
               </button>
@@ -624,29 +317,30 @@ export default function Home() {
         </section>
       )}
 
-      {libraryChars.length > 0 && (
-        <section className="mt-8 border-t border-hairline pt-7">
-          <span className="font-mono text-[10px] uppercase tracking-[0.18em] text-mute">
-            Preview ──
+      {s.libraryChars.length > 0 && (
+        <section className="mt-8 border-t border-construction pt-7">
+          <span className="font-metric text-[11px] lowercase tracking-[0.22em] text-grey">
+            preview
           </span>
           <div
             className="mt-3 min-h-[5rem] break-words text-6xl leading-tight"
             style={{
-              fontFamily: 'GlyfPreview, system-ui, sans-serif',
+              fontFamily:
+                'GlyfPreview, "Helvetica Neue", Helvetica, sans-serif',
             }}
           >
-            {typeText || (
-              <span className="font-serif italic text-[15px] text-mute">
+            {s.typeText || (
+              <span className="font-wordmark text-[15px] italic text-grey">
                 type below to preview
               </span>
             )}
           </div>
           <textarea
-            value={typeText}
-            onChange={(e) => setTypeText(e.target.value)}
+            value={s.typeText}
+            onChange={(e) => s.setTypeText(e.target.value)}
             rows={2}
             placeholder="The quick brown fox..."
-            className="mt-4 w-full border-0 border-b border-hairline bg-transparent pb-2 font-mono text-sm placeholder:text-mute focus:border-ink focus:outline-none"
+            className="mt-4 w-full border-0 border-b border-construction bg-transparent pb-2 font-metric text-sm caret-pen placeholder:text-faint focus:border-ink focus:outline-none"
           />
         </section>
       )}
@@ -683,32 +377,9 @@ function statusMeta(status: Status, elapsed: number) {
   }
 }
 
-function Specimen({
-  svg,
-  isStreaming,
-  idle,
-  anchorsVisible,
-  selectedAnchors,
-  onSelectionChange,
-  onPathChange,
-  zoom,
-  onZoomChange,
-  pan,
-  onPanChange,
-}: {
-  svg: string;
-  isStreaming: boolean;
-  idle: boolean;
-  anchorsVisible: boolean;
-  selectedAnchors: ReadonlySet<number>;
-  onSelectionChange: (ids: ReadonlySet<number>) => void;
-  onPathChange: (svg: string, final: boolean) => void;
-  zoom: number;
-  onZoomChange: (zoom: number) => void;
-  pan: { x: number; y: number };
-  onPanChange: (pan: { x: number; y: number }) => void;
-}) {
+function Specimen({ s }: { s: ReturnType<typeof useGlyfStudio> }) {
   const canvasRef = useRef<HTMLDivElement>(null);
+  const { zoom, setZoom } = s;
 
   useEffect(() => {
     const el = canvasRef.current;
@@ -718,18 +389,19 @@ function Specimen({
       e.preventDefault();
       const delta = -e.deltaY * 0.005;
       const next = Math.max(1, Math.min(5, +(zoom + delta).toFixed(2)));
-      onZoomChange(next);
+      setZoom(next);
     }
     el.addEventListener('wheel', onWheel, { passive: false });
     return () => el.removeEventListener('wheel', onWheel);
-  }, [zoom, onZoomChange]);
+  }, [zoom, setZoom]);
+
   return (
     <div>
       <div className="relative mb-2 mr-16 h-3">
         {V_TICKS.map((t) => (
           <span
             key={t}
-            className="absolute font-mono text-[9px] text-mute"
+            className="absolute font-metric text-[9px] text-faint"
             style={{
               left: `${(t / 1000) * 100}%`,
               transform:
@@ -747,66 +419,66 @@ function Specimen({
       <div className="flex gap-3">
         <div
           ref={canvasRef}
-          className="relative aspect-square flex-1 overflow-hidden border border-hairline"
+          className="neu-inset neu-well relative aspect-square flex-1 overflow-hidden rounded-md"
         >
           <div
             className="absolute inset-0"
             style={{
-              transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
+              transform: `translate(${s.pan.x}px, ${s.pan.y}px) scale(${s.zoom})`,
               transformOrigin: 'center',
             }}
           >
-          <svg
-            className="pointer-events-none absolute inset-0 h-full w-full"
-            viewBox="0 0 1000 1000"
-            preserveAspectRatio="none"
-          >
-            {GUIDES.map((g) => (
-              <line
-                key={`h-${g.label}`}
-                x1={0}
-                x2={1000}
-                y1={g.y}
-                y2={g.y}
-                stroke="var(--hairline)"
-                strokeWidth={1}
-                strokeDasharray="2 3"
-                vectorEffect="non-scaling-stroke"
-              />
-            ))}
-            {[250, 500, 750].map((x) => (
-              <line
-                key={`v-${x}`}
-                x1={x}
-                x2={x}
-                y1={0}
-                y2={1000}
-                stroke="var(--hairline)"
-                strokeWidth={1}
-                strokeDasharray="2 3"
-                vectorEffect="non-scaling-stroke"
-              />
-            ))}
-          </svg>
-          <div
-            className={`glyf-svg absolute inset-0 [&_svg]:h-full [&_svg]:w-full${
-              isStreaming ? ' is-streaming' : ''
-            }`}
-            dangerouslySetInnerHTML={{ __html: svg }}
-          />
-          <PathEditor
-            svg={svg}
-            onChange={onPathChange}
-            disabled={isStreaming || idle || !anchorsVisible}
-            selectedIds={selectedAnchors}
-            onSelectionChange={onSelectionChange}
-            zoom={zoom}
-            pan={pan}
-            onPanChange={onPanChange}
-          />
+            <svg
+              className="pointer-events-none absolute inset-0 h-full w-full"
+              viewBox="0 0 1000 1000"
+              preserveAspectRatio="none"
+            >
+              {GUIDES.map((g) => (
+                <line
+                  key={`h-${g.label}`}
+                  x1={0}
+                  x2={1000}
+                  y1={g.y}
+                  y2={g.y}
+                  stroke="var(--hairline)"
+                  strokeWidth={1}
+                  strokeDasharray="2 3"
+                  vectorEffect="non-scaling-stroke"
+                />
+              ))}
+              {[250, 500, 750].map((x) => (
+                <line
+                  key={`v-${x}`}
+                  x1={x}
+                  x2={x}
+                  y1={0}
+                  y2={1000}
+                  stroke="var(--hairline)"
+                  strokeWidth={1}
+                  strokeDasharray="2 3"
+                  vectorEffect="non-scaling-stroke"
+                />
+              ))}
+            </svg>
+            <div
+              className={`glyf-svg absolute inset-0 [&_svg]:h-full [&_svg]:w-full${
+                s.isStreaming ? ' is-streaming' : ''
+              }`}
+              dangerouslySetInnerHTML={{ __html: s.svg }}
+            />
+            <PathEditor
+              svg={s.svg}
+              onChange={s.handlePathChange}
+              disabled={s.isStreaming || s.idle || !s.anchorsVisible}
+              selectedIds={s.selectedAnchors}
+              onSelectionChange={s.setSelectedAnchors}
+              zoom={s.zoom}
+              pan={s.pan}
+              onPanChange={s.setPan}
+            />
           </div>
-          {idle && (
-            <div className="pointer-events-none absolute inset-0 flex items-center justify-center font-serif italic text-mute">
+          {s.idle && (
+            <div className="pointer-events-none absolute inset-0 flex items-center justify-center font-wordmark italic text-grey">
               awaiting input.
             </div>
           )}
@@ -815,14 +487,14 @@ function Specimen({
           {GUIDES.map((g) => (
             <div
               key={g.label}
-              className="absolute flex w-full items-baseline justify-between font-mono text-[10px] uppercase tracking-[0.1em]"
+              className="absolute flex w-full items-baseline justify-between font-metric text-[10px] uppercase tracking-[0.1em]"
               style={{
                 top: `${(g.y / 1000) * 100}%`,
                 transform: 'translateY(-50%)',
               }}
             >
-              <span className="text-ink">{g.label}</span>
-              <span className="text-mute">{g.y}</span>
+              <span className="text-faint">{g.label}</span>
+              <span className="text-faint">{g.y}</span>
             </div>
           ))}
         </div>

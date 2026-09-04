@@ -1,30 +1,51 @@
 @import "tailwindcss";
 
+/* glyf design system v0.1 — "graphite & signal"
+   light warm-grey paper · ink structure · grey construction · red pen.
+   Palette swaps happen here and nowhere else. */
 :root {
-  --paper: #ffffff;
-  --ink: #0a0a0a;
-  --hairline: #d4d4d4;
-  --mute: #737373;
+  --paper: #f1f1f1;
+  --sheet: #fafafa;
+  --ink: #111111;
+  --grey: #525252;
+  --faint: #b3b3b3;
+  --construction: #c2c2c2;
+  --shadow-dark: color-mix(in srgb, var(--ink) 18%, transparent);
+  --shadow-light: color-mix(in srgb, #ffffff 45%, var(--paper));
+  --pen: #c2271e;
+  /* color of marks drawn ON the sheet (glyphs, editor chrome) — differs from
+     --ink on dark desks where the sheet stays light */
+  --glyph: #161613;
+  /* PathEditor compatibility: its in-editor guides are construction lines */
+  --hairline: var(--construction);
 }
 
 @theme inline {
   --color-paper: var(--paper);
+  --color-sheet: var(--sheet);
   --color-ink: var(--ink);
-  --color-hairline: var(--hairline);
-  --color-mute: var(--mute);
-  --font-serif: var(--font-instrument-serif);
-  --font-mono: var(--font-geist-mono);
+  --color-grey: var(--grey);
+  --color-faint: var(--faint);
+  --color-construction: var(--construction);
+  --color-pen: var(--pen);
+  --font-ui: "Helvetica Neue", Helvetica, var(--font-archivo), Arial, sans-serif;
+  --font-metric: var(--font-dm-mono), monospace;
+  --font-wordmark: var(--font-fraunces), serif;
 }
 
 body {
   background: var(--paper);
   color: var(--ink);
-  font-family: var(--font-geist-mono), monospace;
+  font-family: "Helvetica Neue", Helvetica, var(--font-archivo), Arial, sans-serif;
   font-feature-settings: "tnum" 1;
 }
 
 .glyf-svg {
-  color: var(--ink);
+  color: var(--glyph);
+}
+
+input {
+  color: var(--glyph);
 }
 
 .glyf-svg path {
@@ -40,7 +61,51 @@ body {
 
 .glyf-svg.is-streaming path {
   fill: none !important;
-  stroke: #c2271e;
+  stroke: var(--pen);
   stroke-width: 1.5px;
   transition: none;
+}
+
+.glyf-ghost svg {
+  width: 100%;
+  height: 100%;
+}
+
+.glyf-ghost path {
+  fill: none !important;
+  stroke: var(--faint);
+  stroke-width: 1px;
+  vector-effect: non-scaling-stroke;
+}
+
+.neu-raised {
+  box-shadow:
+    2px 2px 3px var(--shadow-dark),
+    -2px -2px 3px var(--shadow-light);
+}
+
+.neu-inset {
+  box-shadow:
+    inset 0 0 8px var(--shadow-dark),
+    inset 0 0 2px var(--shadow-dark);
+}
+
+.neu-well {
+  background: color-mix(in srgb, var(--paper) 55%, var(--sheet));
+}
+
+.neu-key {
+  box-shadow:
+    2px 2px 4px var(--shadow-dark),
+    -2px -2px 4px var(--shadow-light);
+}
+
+.neu-key:active:not(:disabled) {
+  box-shadow:
+    inset 2px 2px 4px var(--shadow-dark),
+    inset -2px -2px 4px var(--shadow-light);
+}
+
+.neu-key:disabled {
+  box-shadow: none;
 }

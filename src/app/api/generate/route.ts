@@ -33,7 +33,8 @@ export async function POST(request: Request) {
   }
 
   const modalUrl = process.env.MODAL_URL;
-  if (modalUrl) {
+  const forceMock = process.env.MOCK === '1';
+  if (modalUrl && !forceMock) {
     const upstream = await fetch(modalUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

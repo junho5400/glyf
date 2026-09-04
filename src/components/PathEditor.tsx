@@ -508,7 +508,7 @@ export function PathEditor({
           width={selBbox.xMax - selBbox.xMin}
           height={selBbox.yMax - selBbox.yMin}
           fill="transparent"
-          stroke="#c2271e"
+          stroke="var(--pen)"
           strokeWidth={1}
           strokeDasharray="4 4"
           vectorEffect="non-scaling-stroke"
@@ -532,12 +532,12 @@ export function PathEditor({
               isSelected
                 ? '#c2271e'
                 : dragging === i
-                  ? 'var(--ink)'
+                  ? 'var(--glyph)'
                   : isAnchor
-                    ? 'var(--ink)'
-                    : 'white'
+                    ? 'var(--glyph)'
+                    : 'var(--sheet)'
             }
-            stroke={isSelected ? '#c2271e' : 'var(--ink)'}
+            stroke={isSelected ? '#c2271e' : 'var(--glyph)'}
             strokeWidth={1.5}
             vectorEffect="non-scaling-stroke"
             style={{ cursor: dragging === i ? 'grabbing' : 'grab' }}
@@ -557,7 +557,7 @@ export function PathEditor({
             y1={selBbox.yMin}
             x2={(selBbox.xMin + selBbox.xMax) / 2}
             y2={selBbox.yMin - ROTATE_HANDLE_OFFSET}
-            stroke="#c2271e"
+            stroke="var(--pen)"
             strokeWidth={1}
             vectorEffect="non-scaling-stroke"
           />
@@ -565,8 +565,8 @@ export function PathEditor({
             cx={(selBbox.xMin + selBbox.xMax) / 2}
             cy={selBbox.yMin - ROTATE_HANDLE_OFFSET}
             r={8}
-            fill="white"
-            stroke="#c2271e"
+            fill="var(--sheet)"
+            stroke="var(--pen)"
             strokeWidth={1.5}
             vectorEffect="non-scaling-stroke"
             style={{ cursor: 'grab' }}
@@ -596,8 +596,8 @@ export function PathEditor({
             y={y - CORNER_SIZE / 2}
             width={CORNER_SIZE}
             height={CORNER_SIZE}
-            fill="white"
-            stroke="#c2271e"
+            fill="var(--sheet)"
+            stroke="var(--pen)"
             strokeWidth={1.5}
             vectorEffect="non-scaling-stroke"
             style={{ cursor: cur }}
@@ -615,7 +615,7 @@ export function PathEditor({
           width={Math.abs(selRect.x2 - selRect.x1)}
           height={Math.abs(selRect.y2 - selRect.y1)}
           fill="none"
-          stroke="var(--ink)"
+          stroke="var(--glyph)"
           strokeWidth={1}
           strokeDasharray="4 4"
           vectorEffect="non-scaling-stroke"
@@ -628,11 +628,11 @@ export function PathEditor({
           x={draggedHandle.x + xShift}
           y={draggedHandle.y - 18}
           fontSize={22}
-          fontFamily="var(--font-geist-mono), monospace"
-          fill="var(--ink)"
+          fontFamily="var(--font-dm-mono), monospace"
+          fill="var(--pen)"
           textAnchor="middle"
         >
-          {Math.round(draggedHandle.x)}, {Math.round(draggedHandle.y)}
+          ({Math.round(draggedHandle.x)} · {Math.round(draggedHandle.y)})
         </text>
       )}
     </svg>
